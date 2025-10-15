@@ -1,35 +1,38 @@
+const API_CONFIG_KEY = 'api_config';
 
-const GEMINI_API_KEY_STORAGE_KEY = 'gemini_api_key';
-const GITHUB_API_KEY_STORAGE_KEY = 'github_api_key';
+export interface ApiConfig {
+    selectedProvider: 'gemini' | 'github';
+    gemini: string | null;
+    github: string | null;
+}
 
-type ApiService = 'gemini' | 'github';
+const DEFAULT_CONFIG: ApiConfig = {
+    selectedProvider: 'gemini',
+    gemini: null,
+    github: null,
+};
 
-export const setApiKey = (service: ApiService, key: string): void => {
-    const storageKey = service === 'gemini' ? GEMINI_API_KEY_STORAGE_KEY : GITHUB_API_KEY_STORAGE_KEY;
+export const setApiConfig = (config: Partial<ApiConfig>): void => {
     try {
-        if (key) {
-            localStorage.setItem(storageKey, key);
-        } else {
-            localStorage.removeItem(storageKey);
+        const currentConfig = getApiConfig();
+        const newConfig = { ...currentConfig, ...config };
+        localStorage.setItem(API_CONFIG_KEY, JSON.stringify(newConfig));
+    } catch (e) {
+        console.error(`Could not save API config to localStorage.`, e);
+    }
+};
+
+export const getApiConfig = (): ApiConfig => {
+    try {
+        const storedConfig = localStorage.getItem(API_CONFIG_KEY);
+        if (storedConfig) {
+            const parsed = JSON.parse(storedConfig);
+            // Merge with defaults to ensure all keys are present
+            return { ...DEFAULT_CONFIG, ...parsed };
         }
+        return DEFAULT_CONFIG;
     } catch (e) {
-        console.error(`Could not save ${service} API key to localStorage.`, e);
+        console.error(`Could not retrieve API config from localStorage.`, e);
+        return DEFAULT_CONFIG;
     }
-};
-
-export const getApiKey = (service: ApiService): string | null => {
-    const storageKey = service === 'gemini' ? GEMINI_API_KEY_STORAGE_KEY : GITHUB_API_KEY_STORAGE_KEY;
-    try {
-        return localStorage.getItem(storageKey);
-    } catch (e) {
-        console.error(`Could not retrieve ${service} API key from localStorage.`, e);
-        return null;
-    }
-};
-
-export const getAllApiKeys = (): { gemini: string; github: string } => {
-    return {
-        gemini: getApiKey('gemini') || '',
-        github: getApiKey('github') || '',
-    };
 };

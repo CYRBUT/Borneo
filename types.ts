@@ -52,6 +52,7 @@ export interface UploadHistoryItem {
     from: Language;
     to: Language;
     date: string;
+    source: 'local' | 'github';
 }
 
 export interface TranslationHistoryItem {
@@ -69,3 +70,10 @@ export interface CulturalPost {
     text: string;
     date: string;
 }
+
+// Defines the structure for the custom dictionary.
+// Used for both localStorage and GitHub-based dictionaries.
+// Format: { "Indonesian-Bakumpai": { "source_word": "target_word" } }
+export type Dictionary = {
+    [key: string]: { [key: string]: string };
+};

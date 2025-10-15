@@ -1,14 +1,21 @@
 
 import { GoogleGenAI, Modality } from "@google/genai";
-import { Language } from "../types";
-import { getApiKey as getStoredApiKey } from './apiKeyService';
+import { Language, Dictionary } from "../types";
+import { getApiConfig } from './apiKeyService';
+import { getDictionary as getGithubDictionary } from './githubService';
 
 let ai: GoogleGenAI | null = null;
 
 // Function to get API key from the centralized service, then fallback to environment variables
 export const getApiKey = (): string | null => {
     try {
-        return getStoredApiKey('gemini') || process.env.API_KEY || null;
+        const config = getApiConfig();
+        if (config.selectedProvider === 'gemini') {
+            return config.gemini || process.env.API_KEY || null;
+        }
+        // If Gemini is not the selected provider, don't provide a key for initialization.
+        // Fallback to env var only as a last resort if no config is set at all.
+        return process.env.API_KEY || null;
     } catch (e) {
         // This might catch errors if the environment is very restrictive, though unlikely.
         return process.env.API_KEY || null;
@@ -23,7 +30,12 @@ const initializeAi = () => {
         console.log("Gemini AI client initialized successfully.");
     } else {
         ai = null;
-        console.warn("API Key not found. Please set your Gemini API key in the application settings.");
+        const config = getApiConfig();
+        if(config.selectedProvider !== 'gemini') {
+             console.warn("Gemini is not the selected API provider. Translation features will be disabled.");
+        } else {
+            console.warn("API Key not found. Please set your Gemini API key in the application settings.");
+        }
     }
 };
 
@@ -39,24 +51,57 @@ initializeAi();
 
 const CUSTOM_DICTIONARY_KEY = 'customDictionary';
 
-type Dictionary = {
-    [key: string]: { [key: string]: string };
+let dictionaryCache: Dictionary | null = null;
+let lastCacheTime: number = 0;
+const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes cache
+
+// Invalidates the in-memory dictionary cache.
+// Called after an admin updates the dictionary on GitHub.
+export const invalidateDictionaryCache = () => {
+    dictionaryCache = null;
+    lastCacheTime = 0;
+    console.log("Custom dictionary cache invalidated.");
 };
 
-// Function to get the custom dictionary from localStorage
-const getCustomDictionary = (): Dictionary => {
-    try {
-        const storedDict = localStorage.getItem(CUSTOM_DICTIONARY_KEY);
-        return storedDict ? JSON.parse(storedDict) : {};
-    } catch (error) {
-        console.error("Failed to parse custom dictionary from localStorage", error);
-        return {};
+// Function to get the custom dictionary. It's now async and fetches
+// from GitHub or localStorage based on the selected API provider.
+const getCustomDictionary = async (): Promise<Dictionary> => {
+    const config = getApiConfig();
+    if (config.selectedProvider === 'github') {
+        const now = Date.now();
+        if (dictionaryCache && (now - lastCacheTime < CACHE_DURATION)) {
+            console.log("Using cached GitHub dictionary.");
+            return dictionaryCache;
+        }
+        try {
+            console.log("Fetching dictionary from GitHub...");
+            const dictionary = await getGithubDictionary();
+            dictionaryCache = dictionary;
+            lastCacheTime = now;
+            return dictionary;
+        } catch (error) {
+            console.error("Failed to fetch custom dictionary from GitHub:", error);
+            // On failure, return an empty dictionary to prevent crash
+            return {};
+        }
+    } else {
+        // Fallback to localStorage for 'gemini' provider
+        try {
+            const storedDict = localStorage.getItem(CUSTOM_DICTIONARY_KEY);
+            return storedDict ? JSON.parse(storedDict) : {};
+        } catch (error) {
+            console.error("Failed to parse custom dictionary from localStorage", error);
+            return {};
+        }
     }
 };
 
+
 // Function to update the custom dictionary in localStorage
 export const updateCustomDictionary = (from: Language, to: Language, text: string, translation: string) => {
-    const dictionary = getCustomDictionary();
+    const storedDict = localStorage.getItem(CUSTOM_DICTIONARY_KEY);
+    const dictionary: Dictionary = storedDict ? JSON.parse(storedDict) : {};
+    
     const key = `${from}-${to}`;
     if (!dictionary[key]) {
         dictionary[key] = {};
@@ -76,10 +121,14 @@ export const translateText = async (
     to: Language
 ): Promise<string> => {
     if (!ai) {
+        const config = getApiConfig();
+        if (config.selectedProvider !== 'gemini') {
+            throw new Error("Gemini is not the selected API provider. Please change it in the settings.");
+        }
         throw new Error("API Key not configured. Please set it in the settings.");
     }
 
-    const dictionary = getCustomDictionary();
+    const dictionary = await getCustomDictionary();
     const dictKey = `${from}-${to}`;
     const cleanedText = text.toLowerCase().trim();
 

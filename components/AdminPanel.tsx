@@ -1,12 +1,14 @@
 
 import React, { useState, useEffect } from 'react';
 import { SOCIAL_LINKS } from '../constants';
-import { Language, UploadHistoryItem, Donation, Comment } from '../types';
+import { Language, UploadHistoryItem, Donation, Comment, Dictionary } from '../types';
 import { ArrowUpOnSquareIcon, LogoutIcon, ChartBarIcon, CurrencyDollarIcon } from './icons/HeroIcons';
-import { InstagramIcon, TelegramIcon, TikTokIcon } from './icons/SocialIcons';
+import { InstagramIcon, TelegramIcon, TikTokIcon, GitHubIcon } from './icons/SocialIcons';
 import LanguageSelector from './LanguageSelector';
-import { updateCustomDictionary } from '../services/geminiService';
-import { PieChart, LineChart } from './charts';
+import { updateCustomDictionary, invalidateDictionaryCache } from '../services/geminiService';
+import { getApiConfig } from '../services/apiKeyService';
+import * as githubService from '../services/githubService';
+import { PieChart } from './charts';
 
 
 const ProfileCard: React.FC<{ onLogout: () => void }> = ({ onLogout }) => (
@@ -52,6 +54,11 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
     const [toLang, setToLang] = useState<Language>(Language.BAKUMPAI);
     const [showSuccessToast, setShowSuccessToast] = useState(false);
     const [successMessage, setSuccessMessage] = useState('');
+    const [isUploading, setIsUploading] = useState(false);
+    const [uploadError, setUploadError] = useState<string | null>(null);
+
+    const apiConfig = getApiConfig();
+    const isGithubProvider = apiConfig.selectedProvider === 'github';
 
     useEffect(() => {
         try {
@@ -87,45 +94,90 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
     const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
         if (event.target.files && event.target.files[0]) {
             setSelectedFile(event.target.files[0]);
+            setUploadError(null);
         }
     };
+    
+    const showToast = (message: string) => {
+        setSuccessMessage(message);
+        setShowSuccessToast(true);
+        setTimeout(() => setShowSuccessToast(false), 3000);
+    }
 
     const handleUpload = () => {
         if (!selectedFile) return;
     
         const reader = new FileReader();
-        reader.onload = (e) => {
-            const text = e.target?.result as string;
-            if (!text) return;
-    
-            const lines = text.split('\n');
-            let updatedCount = 0;
-            lines.forEach(line => {
-                const parts = line.split(',');
-                if (parts.length >= 2) {
-                    const source = parts[0].trim();
-                    // Handle cases where the target might contain commas
-                    const target = parts.slice(1).join(',').trim();
-                    if (source && target) {
-                        updateCustomDictionary(fromLang, toLang, source, target);
-                        updatedCount++;
+        reader.onload = async (e) => {
+            const uploadedText = e.target?.result as string;
+            if (!uploadedText) return;
+
+            setIsUploading(true);
+            setUploadError(null);
+
+            try {
+                let updatedCount = 0;
+                if (isGithubProvider) {
+                    const { dictionary: existingDict, sha } = await githubService.getDictionaryWithSha();
+                    
+                    const newPhrases = uploadedText.split('\n');
+                    const key = `${fromLang}-${toLang}`;
+                    if (!existingDict[key]) existingDict[key] = {};
+                    
+                    newPhrases.forEach(line => {
+                        const parts = line.split(',');
+                        if (parts.length >= 2) {
+                            const source = parts[0].trim().toLowerCase();
+                            const target = parts.slice(1).join(',').trim();
+                            if (source && target) {
+                                if(existingDict[key][source] !== target) {
+                                    existingDict[key][source] = target;
+                                    updatedCount++;
+                                }
+                            }
+                        }
+                    });
+                    
+                    if(updatedCount > 0){
+                        await githubService.updateDictionary(existingDict, sha);
+                        invalidateDictionaryCache();
                     }
+
+                } else { // Local Storage logic
+                    const lines = uploadedText.split('\n');
+                    lines.forEach(line => {
+                        const parts = line.split(',');
+                        if (parts.length >= 2) {
+                            const source = parts[0].trim();
+                            const target = parts.slice(1).join(',').trim();
+                            if (source && target) {
+                                updateCustomDictionary(fromLang, toLang, source, target);
+                                updatedCount++;
+                            }
+                        }
+                    });
                 }
-            });
-    
-            if (updatedCount > 0) {
-                const newHistoryItem: UploadHistoryItem = {
-                    fileName: selectedFile.name,
-                    from: fromLang,
-                    to: toLang,
-                    date: new Date().toISOString(),
-                };
-                setUploadHistory(prev => [newHistoryItem, ...prev]);
-                setSuccessMessage(`${updatedCount} phrase(s) added to dictionary.`);
-                setShowSuccessToast(true);
-                setTimeout(() => setShowSuccessToast(false), 3000);
+        
+                if (updatedCount > 0) {
+                    const newHistoryItem: UploadHistoryItem = {
+                        fileName: selectedFile.name,
+                        from: fromLang,
+                        to: toLang,
+                        date: new Date().toISOString(),
+                        source: isGithubProvider ? 'github' : 'local',
+                    };
+                    setUploadHistory(prev => [newHistoryItem, ...prev]);
+                    showToast(`${updatedCount} phrase(s) added to dictionary.`);
+                } else {
+                    showToast('No new phrases were added.');
+                }
+            } catch (err) {
+                 const errorMessage = err instanceof Error ? err.message : 'An unknown error occurred.';
+                 setUploadError(`Upload failed: ${errorMessage}`);
+            } finally {
+                setIsUploading(false);
+                setSelectedFile(null);
             }
-            setSelectedFile(null);
         };
         reader.readAsText(selectedFile);
     };
@@ -150,7 +202,13 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
                     </div>
                 </Section>
                 <Section title="Improve Dictionary" icon={<ArrowUpOnSquareIcon />}>
-                    <p className="text-medium-light-text dark:text-medium-text mb-4 text-sm">Upload a CSV or TXT file with translations to improve accuracy. Format: `source phrase,target phrase` per line.</p>
+                    <div className="flex justify-between items-center mb-4">
+                        <p className="text-medium-light-text dark:text-medium-text text-sm">Upload a CSV (`source,target`) to improve accuracy.</p>
+                        <div className={`flex items-center text-xs px-2 py-1 rounded-full ${isGithubProvider ? 'bg-gray-800 text-white' : 'bg-brand-primary/10 text-brand-primary'}`}>
+                            {isGithubProvider ? <GitHubIcon className="h-4 w-4 mr-1"/> : null}
+                            <span>Source: {isGithubProvider ? 'GitHub' : 'Local'}</span>
+                        </div>
+                    </div>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
                         <LanguageSelector selectedLanguage={fromLang} onLanguageChange={setFromLang} id="upload-from" label="From"/>
                         <LanguageSelector selectedLanguage={toLang} onLanguageChange={setToLang} id="upload-to" label="To"/>
@@ -160,10 +218,11 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
                             {selectedFile ? selectedFile.name : 'Choose File'}
                         </label>
                         <input id="file-upload" type="file" className="hidden" onChange={handleFileChange} accept=".csv,.txt" />
-                        <button onClick={handleUpload} disabled={!selectedFile || fromLang === toLang} className="bg-brand-primary text-white font-bold py-2 px-6 rounded-lg hover:bg-brand-secondary transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
-                            Upload
+                        <button onClick={handleUpload} disabled={!selectedFile || fromLang === toLang || isUploading} className="bg-brand-primary text-white font-bold py-2 px-6 rounded-lg hover:bg-brand-secondary transition-colors disabled:opacity-50 disabled:cursor-not-allowed w-28 text-center">
+                            {isUploading ? '...' : 'Upload'}
                         </button>
                     </div>
+                    {uploadError && <p className="text-red-500 text-sm mt-2">{uploadError}</p>}
                 </Section>
                 <Section title="Upload History" icon={<ArrowUpOnSquareIcon />}>
                     <ul className="space-y-2 max-h-60 overflow-y-auto pr-2">
@@ -173,7 +232,10 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
                                     <p className="font-semibold">{item.fileName}</p>
                                     <p className="text-xs text-medium-light-text dark:text-medium-text">{item.from} → {item.to}</p>
                                 </div>
-                                <span className="text-xs text-medium-light-text dark:text-medium-text">{formatDate(item.date)}</span>
+                                <div className="flex items-center">
+                                    {item.source === 'github' && <GitHubIcon className="h-4 w-4 mr-2" />}
+                                    <span className="text-xs text-medium-light-text dark:text-medium-text">{formatDate(item.date)}</span>
+                                </div>
                             </li>
                         )) : <p className="text-medium-light-text dark:text-medium-text text-sm">No files uploaded yet.</p>}
                     </ul>
